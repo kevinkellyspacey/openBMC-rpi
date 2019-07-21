@@ -1,0 +1,13 @@
+[Unit]
+Description=Fan Control Service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=1
+WorkingDirectory=/usr/sbin
+ExecStart=/usr/sbin/fan-control.sh start
+
+[Install]
+WantedBy=multi-user.target
