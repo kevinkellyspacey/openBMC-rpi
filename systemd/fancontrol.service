@@ -4,8 +4,19 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
+RemainAfterExit=yes
 WorkingDirectory=/usr/sbin
-ExecStart=/usr/sbin/fan-control.py start
+ExecStart=/usr/sbin/fan_control.py
+Restart=on-abort
+MemoryDenyWriteExecute=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=True
+RestrictRealTime=true
 
 [Install]
 WantedBy=multi-user.target
