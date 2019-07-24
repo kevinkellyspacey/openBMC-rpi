@@ -3,7 +3,7 @@
 import argparse
 import smbus
 import time
-from smbpbi import smbpbi_read
+from openBMC.smbpbi import smbpbi_read
 from datetime import datetime
 from datetime import timedelta
 
