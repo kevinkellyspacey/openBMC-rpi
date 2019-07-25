@@ -4,8 +4,12 @@ import argparse
 import smbus
 import time
 from openBMC.smbpbi import smbpbi_read
+from openBMC.serial_shell import ushell
+from openBMC.dbus_backend import Backend
 from datetime import datetime
 from datetime import timedelta
+from threading import Thread
+import logging
 
 ##                ##
 ##Common Variables##
@@ -141,6 +145,16 @@ class fan_control(object):
         self.polling = polling
         self.bus = bus
         self.thredhold = 900 # 900 ms to finish one loop
+        # user set group(GPU0,GPU1,LR) from uart input, -1 represent there's no uart request which is also the intial default otherwise 0-100
+        self.user_set = [-1,-1,-1]
+
+        
+        #dbus timeout
+        self.timeout = timeout
+
+        self.fan_thread = Thread(target=self.fan_ctrl_loop)
+        self.uart_thread = Thread(target=self.ushell_loop)
+        self.listenerThread = Thread(target=self.dbus_listener)
 
     def fan_ctrl_loop(self,):
         start_point = datetime.now()
@@ -152,7 +166,7 @@ class fan_control(object):
                 ## GPU0 fan control ###########################################
                 if GPU0_pwr_good_set == 0 :
                     duty_cycle_percent = 20
-                else:
+                elif self.user_set[0] == -1:
                     # get GPU0 temp
                     gpu = get_temp("GPU0_TEMP",self.bus)
                     # get GPU0 HBM
@@ -180,7 +194,7 @@ class fan_control(object):
                 ## GPU1 fan control ############################################
                 if GPU1_pwr_good_set == 0 :
                     duty_cycle_percent = 20
-                else:
+                elif self.user_set[1] == -1:
                     # get GPU1 temp
                     gpu = get_temp("GPU1_TEMP",self.bus)
                     # get GPU1 HBM
@@ -208,7 +222,7 @@ class fan_control(object):
                 ## LR fan control ##############################################
                 if LR_pwr_good_set == 0 :
                     duty_cycle_percent = 20
-                else:
+                elif self.user_set[2] == -1:
                     # get LR temp
                     gpu = get_temp("LR_TEMP",self.bus)
                     if (gpu == -1):
@@ -231,10 +245,34 @@ class fan_control(object):
                 #update start point
                 start_point = datetime.now()
 
+    def ushell_loop(self,):
+        pass
+
+    def dbus_listener(self,):
+        '''listener thread to catch every Application signal'''
+        #create dbus server
+        svr = Backend.create_dbus_server()
+        sys.stdout.write("dbus_listener thread is running!")
+        logging.debug("the svr is {}".format(svr))
+        if not svr:
+            logging.error("Error spawning DBUS server")
+            sys.exit(10)
+        if self.timeout == 0:
+            logging.debug("dbus session server is running")
+            svr.run_dbus_service()
+
+        else:
+            svr.run_dbus_service(self.timeout)
+
+    def run(self,):
+        self.fan_thread.start()
+        self.uart_thread.start()
+
 
 if __name__ == '__main__':
     i2c1 = i2c1_init()
     tmp451_init(i2c1)
     loop_task = fan_control(i2c1)
-    loop_task.fan_ctrl_loop()
+    #loop_task.fan_ctrl_loop()
+    loop_task.run()
    
