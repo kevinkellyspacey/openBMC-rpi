@@ -1,5 +1,6 @@
 import sys
 from setuptools import setup
+import glob
 
 setup(
     name = "openBMC",
@@ -11,4 +12,6 @@ setup(
     license = "MIT",
     keywords = "test",
     url = "",
+    data_files=[('/etc/dbus-1/system.d/', glob.glob('backend/*.conf')),
+    			('share/dbus-1/system-services', glob.glob('backend/*.service'))],
 )

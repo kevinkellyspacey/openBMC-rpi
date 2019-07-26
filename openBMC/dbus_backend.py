@@ -3,9 +3,11 @@
 
 import logging, os, signal
 
-from gi.repository import GLib
+import glib
+import gobject
 
 import dbus
+import dbus.glib
 import dbus.service
 import dbus.mainloop.glib
 import subprocess
@@ -33,13 +35,7 @@ class Backend(dbus.service.Object):
         #initialize variables that will be used during create and run
         self.bus = None
         self.main_loop = None
-        self._timeout = False
         self.dbus_name = None
-
-        # cached D-BUS interfaces for _check_polkit_privilege()
-        self.dbus_info = None
-        self.polkit = None
-        self.enforce_polkit = True
 
         # e4700_board instance
         self.e4700_board = e4700_board(1.0,)
@@ -54,24 +50,17 @@ class Backend(dbus.service.Object):
         If send_usr1 is True, this will send a SIGUSR1 to the parent process
         once the server is ready to take requests.
         '''
+        gobject.threads_init()
+        dbus.glib.init_threads()
+
         dbus.service.Object.__init__(self, self.bus, '/RPI')
-        self.main_loop = GLib.MainLoop()
-        self._timeout = False
-        if timeout:
-            def _quit():
-                """This function is ran at the end of timeout"""
-                self.main_loop.quit()
-                return True
-            GLib.timeout_add(timeout * 1000, _quit)
+        self.main_loop = glib.MainLoop()
 
         # send parent process a signal that we are ready now
         if send_usr1:
             os.kill(os.getppid(), signal.SIGUSR1)
 
-        # run until we time out
-        while not self._timeout:
-            if timeout:
-                self._timeout = True
+        while True:
             # logging.debug("check session bus server is running!")
             self.main_loop.run()
 
@@ -87,7 +76,6 @@ class Backend(dbus.service.Object):
         dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
         if session_bus:
             backend.bus = dbus.SessionBus()
-            backend.enforce_polkit = True
         else:
             backend.bus = dbus.SystemBus()
         try:
@@ -99,65 +87,7 @@ class Backend(dbus.service.Object):
             return None
         return backend
 
-    #
-    # Internal methods
-    #
 
-    def _reset_timeout(self):
-        '''Reset the D-BUS server timeout.'''
-
-        self._timeout = False
-
-    def _check_polkit_privilege(self, sender, conn, privilege):
-        '''Verify that sender has a given PolicyKit privilege.
-
-        sender is the sender's (private) D-BUS name, such as ":1:42"
-        (sender_keyword in @dbus.service.methods). conn is
-        the dbus.Connection object (connection_keyword in
-        @dbus.service.methods). privilege is the PolicyKit privilege string.
-
-        This method returns if the caller is privileged, and otherwise throws a
-        PermissionDeniedByPolicy exception.
-        '''
-        if sender is None and conn is None:
-            # called locally, not through D-BUS
-            return
-        if not self.enforce_polkit:
-            # that happens for testing purposes when running on the session
-            # bus, and it does not make sense to restrict operations here
-            return
-
-        # get peer PID
-        if self.dbus_info is None:
-            self.dbus_info = dbus.Interface(conn.get_object('org.freedesktop.DBus',
-                '/org/freedesktop/DBus/Bus', False), 'org.freedesktop.DBus')
-        pid = self.dbus_info.GetConnectionUnixProcessID(sender)
-
-        # query PolicyKit
-        if self.polkit is None:
-            self.polkit = dbus.Interface(dbus.SystemBus().get_object(
-                'org.freedesktop.PolicyKit1', '/org/freedesktop/PolicyKit1/Authority', False),
-                'org.freedesktop.PolicyKit1.Authority')
-        try:
-            # we don't need is_challenge return here, since we call with AllowUserInteraction
-            (is_auth, unused, details) = self.polkit.CheckAuthorization(
-                    ('unix-process', {'pid': dbus.UInt32(pid, variant_level=1),
-                        'start-time': dbus.UInt64(0, variant_level=1)}),
-                    privilege, {'': ''}, dbus.UInt32(1), '', timeout=600)
-        except dbus.DBusException as msg:
-            if msg.get_dbus_name() == \
-                                    'org.freedesktop.DBus.Error.ServiceUnknown':
-                # polkitd timed out, connect again
-                self.polkit = None
-                return self._check_polkit_privilege(sender, conn, privilege)
-            else:
-                raise
-
-        if not is_auth:
-            logging.debug('_check_polkit_privilege: sender %s on connection %s pid %i is not authorized for %s: %s',
-                    sender, conn, pid, privilege, str(details))
-            raise PermissionDeniedByPolicy(privilege)
-        return is_auth
     #
     # Client API (through D-BUS)
     #
@@ -175,6 +105,8 @@ class Backend(dbus.service.Object):
                 data = self.e4700_board.get_temp(index)
             elif request == "power":
                 data = self.e4700_board.get_power(index)
+            elif request == "user":
+                data = self.e4700_board.get_user_set(index)
         except Exception as e:
             logging.error("[get_data]ERROR is {}".format(str(e)))
         return (data)
@@ -186,13 +118,17 @@ class Backend(dbus.service.Object):
     def set_data(self, data, type, index, sender=None, conn=None):
         try:
             if type == "percent":
-                self.e4700_board.get_percent(index,data)
+                self.e4700_board.set_percent(index,data)
             elif type == "temp":
-                self.e4700_board.get_temp(index,data)
+                self.e4700_board.set_temp(index,data)
             elif type == "power":
-                self.e4700_board.get_power(index,data)
+                self.e4700_board.set_power(index,data)
+            elif type == "user":
+                self.e4700_board.set_user_set(index,data)
         except Exception as e:
             logging.error("[set_data]ERROR is {}".format(str(e)))
+
+
 
 
 
@@ -207,9 +143,11 @@ class e4700_board(object):
         # user set group(GPU0,GPU1,LR) from uart input, -1 represent there's no uart request which is also the intial default otherwise 0-100
         self.duty_cycle_percent = [-1,-1,-1]
         # group(GPU0,GPU1,LR) current temperatue
-        self.temperature = [None,None,None]
+        self.temperature = [-1,-1,-1]
         # group(GPU0,GPU1,LR) current power
         self.power = [-1,-1,-1]
+        # group(GPU0,GPU1,LR) user set status : 0 is not set while 1 is set
+        self.user_set = [0,0,0]
 
     def set_percent(self,index,percent):
         self.duty_cycle_percent[index] = percent
@@ -220,6 +158,9 @@ class e4700_board(object):
     def set_power(self,index,power):
         self.power[index] = power
 
+    def set_user_set(self,index,status):
+        self.user_set[index] = status
+
     def get_percent(self,index):
         return self.duty_cycle_percent[index]
 
@@ -228,6 +169,9 @@ class e4700_board(object):
 
     def get_power(self,index):
         return self.power[index]
+
+    def get_user_set(self,index):
+        return self.user_set[index]
 
     
 ##                ##
@@ -249,3 +193,71 @@ class PermissionDeniedByPolicy(dbus.DBusException):
 class BackendCrashError(SystemError):
     """Exception Raised if the backend crashes"""
     pass
+
+
+
+def dbus_sync_call_signal_wrapper(dbus_iface, func, handler_map, *args, **kwargs):
+    '''Run a D-BUS method call while receiving signals.
+    This function is an Ugly Hack™, since a normal synchronous dbus_iface.fn()
+    call does not cause signals to be received until the method returns. Thus
+    it calls func asynchronously and sets up a temporary main loop to receive
+    signals and call their handlers; these are assigned in handler_map (signal
+    name → signal handler).
+    '''
+    if not hasattr(dbus_iface, 'connect_to_signal'):
+        # not a D-BUS object
+        return getattr(dbus_iface, func)(*args, **kwargs)
+
+    def _h_reply(*args, **kwargs):
+        """protected method to send a reply"""
+        global _h_reply_result
+        _h_reply_result = args
+        loop.quit()
+
+    def _h_error(exception=None):
+        """protected method to send an error"""
+        global _h_exception_exc
+        _h_exception_exc = exception
+        loop.quit()
+
+    loop = glib.MainLoop()
+    global _h_reply_result, _h_exception_exc
+    _h_reply_result = None
+    _h_exception_exc = None
+    kwargs['reply_handler'] = _h_reply
+    kwargs['error_handler'] = _h_error
+    kwargs['timeout'] = 86400
+    for signame, sighandler in handler_map.items():
+        dbus_iface.connect_to_signal(signame, sighandler)
+    dbus_iface.get_dbus_method(func)(*args, **kwargs)
+    loop.run()
+    if _h_exception_exc:
+        raise _h_exception_exc
+    return _h_reply_result
+
+def unwrap(val):
+    if isinstance(val, dbus.ByteArray):
+        return "".join([str(x) for x in val])
+    if isinstance(val, (dbus.Array, list, tuple)):
+        return [unwrap(x) for x in val]
+    if isinstance(val, (dbus.Dictionary, dict)):
+        return dict([(unwrap(x), unwrap(y)) for x, y in val.items()])
+    if isinstance(val, (dbus.Signature, dbus.String)):
+        return unicode(val)
+    if isinstance(val, dbus.Boolean):
+        return bool(val)
+    if isinstance(val, (dbus.Int16, dbus.UInt16, dbus.Int32, dbus.UInt32, dbus.Int64, dbus.UInt64)):
+        return int(val)
+    if isinstance(val, dbus.Byte):
+        return bytes([int(val)])
+    return val 
+
+if __name__ == '__main__':
+    svr = Backend.create_dbus_server()
+    sys.stdout.write("dbus_listener thread is running!")
+    logging.debug("the svr is {}".format(svr))
+    if not svr:
+        logging.error("Error spawning DBUS server")
+        sys.exit(10)
+    logging.debug("dbus session server is running")
+    svr.run_dbus_service()
