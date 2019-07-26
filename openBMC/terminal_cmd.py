@@ -1,0 +1,431 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+import logging
+from openBMC.smbpbi import smbpbi_read
+import smbus
+from openBMC.fan_control import set_dbus_data,get_dbus_data,pwm_user_reqest_set
+import dbus
+import argparse
+import socket
+import sys
+
+def show(string,serial):
+    if serial:
+        serial.write(string)
+    else:
+        print(string)
+
+class CMDManager(object):
+    def __init__(self, *args, **kwargs):
+        # cmd sample:cmd_name:[cmd_function,max_args_length,description,ret]
+        self.cmd_list ={"help":[self.help_command,
+                                1,
+                                """ Try `help [command]`,\n     
+      Display helpful information about builtin commands.\n     
+      If PATTERN is specified, gives detailed help on all\n
+      commands matching PATTERN, otherwise a list of the\n
+      builtins is printed. The -s option restricts the output\n
+      for each builtin command matching PATTERN to a short usage synopsis""",
+                                False],
+                        "version":[self.version_command,
+                                1,
+                                """ none\n
+      will show the git hash associated with the firmware version\n
+      print the version of firmware""",
+                                True],
+                        "dmesg":[self.dmesg_command,
+                                1,
+                                """ none\n
+      print the system log to shell\n
+      just type dmesg""",
+                                False],
+                        "smbpbi":[self.smbpbi_command,
+                                3,
+                                """ <dev_addr> <data_in(32bits)> <command(32bit)>\n
+      SMBPBI read from a specific device\n""",
+                                True],
+                        "power":[self.smbpbi_sub_command,
+                                1,
+                                """ <gpu index>\n
+      read GPU power for gpu [0-1]\n
+      example arguments: \n
+        power 0\n
+      read specified GPU power""",
+                                True],
+                        "temp":[self.i2c_sub_command,
+                                1,
+                                """ <index>\n
+      read temperature for gpu/LR10 [0-2]\n
+      example arguments: 0 for GPU0, 1 for GPU1, 2 for LR10\n
+        temp 0\n
+      read specified GPU temperature""",
+                                True],
+                        "get_pwm":[self.dbus_command,
+                                1,
+                                """ <pwm index[0-3]>\n
+      get current PWM[0-3] duty cycle\n
+      0:GPU1, 1:GPU2, 2:LR, 3:ALL\n
+      example arguments: \n
+        pwm 1\n
+      get current PWM duty cycle""",
+                                False],
+                        "pwm_restore":[self.dbus_command,
+                                1,
+                                """ <pwm index[0-3]>\n
+      resotre PWM[0-3] for control based on temperature\n
+      0:GPU1, 1:GPU2, 2:LR, 3:ALL\n
+      example arguments: \n
+        pwm_restore 1\n
+      restore PWM duty cycle for control based on temperature""",
+                                False],
+                        "pwm":[self.dbus_command,
+                                2,
+                                """ <pwm index[0-3]> <duty cycle percentage[0-100]>\n
+      specify PWM[0-3] for fans [0-100]\n
+      0:GPU1, 1:GPU2, 2:LR, 3:ALL\n
+      example: \n
+        pwm 0 50\n
+      set GPU1 to 50% duty cycle
+      set PWM duty cycle""",
+                                False],
+                        "hsc":[self.i2c_sub_command,
+                                2,
+                                """hsc number([0-3])> <info type(power,temp,alert)>\n
+      ead HS power, temperature, alert state\n
+      example arguments: \n
+        hsc 1 power\n
+        hsc 1 temp\n
+        hsc 1 alert\n
+      read specified HSC power , temp ,alert""",
+                                False],
+                        "i2c_block_write":[self.i2c_command,
+                                100,
+                                """<dev_addr> <reg_addr> <byte_count> <reg_val[0]> <reg_val[1]> .... \n
+      write block data to a specified smbus device's register""",
+                                False],
+                        "i2c_block_read":[self.i2c_command,
+                                3,
+                                """<dev_addr> <reg_addr> <byte_count>\n
+      read the block data from a specified device's register""",
+                                True],
+                        "i2c_word_write":[self.i2c_command,
+                                3,
+                                """<dev_addr> <dev_reg_addr> <reg_val>\n
+      write word data to a specified smbus device's register""",
+                                False],
+                        "i2c_word_read":[self.i2c_command,
+                                2,
+                                """<dev_addr> <dev_reg_addr>\n
+      read the word data from a specified device's register""",
+                                True],
+                        "i2c_byte_write":[self.i2c_command,
+                                3,
+                                """<dev_addr> <dev_reg_addr> <reg_val>\n
+      write one byte data to a specified smbus device's register""",
+                                False],
+                        "i2c_byte_read":[self.i2c_command,
+                                2,
+                                """<dev_addr> <reg_addr>\n
+      read the byte data from a specified device's register""",
+                                True],
+                        "i2c_dump":[self.i2c_command,
+                                1,
+                                """<i2c_dev_addr>\n
+      dump the data from a specified smbus address""",
+                                False],
+                        "i2c_probe":[self.i2c_command,
+                                0,
+                                """No agrment need\n
+      probe to find physical addresses that ack""",
+                                False],
+                        "ip":[self.ip_command,
+                                0,
+                                """No agrment need\n
+      show the ip address of current openBMC RPI module""",
+                                True],
+                        }
+     
+    def add_cmd(self,cmd_name,*args):
+        if not self.search_cmd(cmd_name):
+            self.cmd_list[cmd_name] = []
+            for para in args:
+                self.cmd_list[cmd_name].append(para)
+
+    def remove_cmd(self,cmd_name):
+        if self.search_cmd(cmd_name):
+            del self.cmd_list[cmd_name]
+
+    def update_cmd(self,cmd_name,*args):
+        if self.search_cmd(cmd_name):
+            for i,para in enumerate(args):
+                self.cmd_list[cmd_name][i] = para
+            return True
+        else:
+            return False
+
+    def search_cmd(self,cmd_name):
+        if cmd_name in self.cmd_list.keys():
+            return True
+        else:
+            return False
+
+    def apply_cmd(self,cmd_name,serial=None,*args):
+        if self.search_cmd(cmd_name):
+            if len(args) <= self.cmd_list[cmd_name][1]:
+                f = self.cmd_list[cmd_name][0]
+                try:
+                    if self.cmd_list[cmd_name][3]:
+                        ret = f(cmd_name,serial,*args)
+                        show(str(ret),serial)
+                    else:
+                        f(cmd_name,serial,*args)
+                except Exception as err:
+                    logging.err(err)
+            else:
+                show("the parametes of the cmd {} is not valid\n".format(cmd_name),serial)
+
+        else:
+            show("this {} is not in the commad list\n".format(cmd_name),serial)
+
+
+    def help_command(self,name,serial=None,cmd_name=None):
+        def print_command_list(serial=None):
+            cmd_list = ""
+            for key in self.cmd_list:
+                cmd_list += "{0}:{1}\n".format(key,self.cmd_list[key][2])
+            show(cmd_list,serial)
+
+        if not cmd_name:
+            print_command_list(serial)
+            return
+        if self.search_cmd(cmd_name):
+            show("{0}:{1}\n".format(cmd_name,self.cmd_list[cmd_name][2]),serial)
+        else:
+            show("commad list doesn't have the cmd [{}]\n".format(cmd_name),serial)
+
+    def version_command(self,name,serial=None):
+        return 1.0
+
+    def dmesg_command(self,name,serial=None):
+        pass
+
+    def smbpbi_command(self,name,serial=None):
+        pass
+
+    def smbpbi_sub_command(self,name,serial=None):
+        if name == "power":
+            pass
+
+       
+    def dbus_command(self,name,serial=None,*args):
+        gpu_index = None
+        percent = None
+        bus = smbus.SMBus(1)
+        dbus_iface = dbus.Interface(dbus.SystemBus().get_object('com.openBMC.RPI','/RPI'),'com.openBMC.RPI')
+        if name == "pwm":
+            if len(args) <2:
+                show("error, must specify PWM index 0-3 and duty cycle 0-100\n",serial)
+                return -1
+            gpu_index = int(args[0])
+            if gpu_index > 3 or gpu_index <0:
+                show("Error: invalid PWM index\n",serial)
+                return -1
+            percent = int(args[1])
+            if percent > 100:
+                percent = 100
+            elif percent < 0:
+                percent = 0
+            if gpu_index == 3:
+                for i in range(3):
+                    set_dbus_data(i,"user",1,dbus_iface)
+                    pwm_user_reqest_set(i,percent,bus,dbus_iface)
+            else:
+                set_dbus_data(gpu_index,"user",1,dbus_iface)
+                pwm_user_reqest_set(gpu_index,percent,bus,dbus_iface)
+
+        if name == "pwm_restore":
+            if len(args) <1:
+                show("error, must specify PWM0/1/2/3\n",serial)
+                return -1
+            gpu_index = int(args[0])
+            if gpu_index > 3 or gpu_index < 0:
+                show("Error: invalid PWM index\n",serial)
+                return -1
+            if gpu_index == 3:
+                for i in range(3):
+                    set_dbus_data(i,"user",0,dbus_iface)
+            else:
+                set_dbus_data(gpu_index,"user",0,dbus_iface)
+
+        if name == "get_pwm":
+            if len(args) <1:
+                show("Error: invalid argument\n",serial)
+                return -1
+            gpu_index = int(args[0])
+            if gpu_index > 3 or gpu_index < 0:
+                show("Error: invalid PWM index\n",serial)
+                return -1
+            if gpu_index == 3:
+                for i in range(3):
+                    show("{0}: {1}%\n".format(i,get_dbus_data(i,"percent",dbus_iface)),serial)
+            else:
+                show("{}%".format(get_dbus_data(gpu_index,"user",dbus_iface)),serial)
+    
+    def i2c_sub_command(self,name,serial=None,*args):
+        if name == "hsc":
+            address_list = [0x40,0x42,0x44,0x46]
+            if len(args) <2:
+                show("Need HSC Number([0-3]),info_type(power,temp,alert)\n",serial)
+                return -1
+            if int(args[0]) > 3 and int(args[0]) <0:
+                show("Error, HSC parameters wrong. Only support [0-3]\n",serial)
+                return -1
+            address = address_list[int(args[0])]
+            if args[1] == "temp":
+                offset = 0x8d
+            elif args[1] == "power":
+                offset = 0x97
+            elif args[1] == "alert":
+                offset = 0x79
+            else:
+                show("Error, info type parameters wrong. Only support power,temp,alert\n",serial)
+                return -1
+            try:
+                val = self.i2c_command("i2c_word_read",address,offset,serial)
+                if args[1] == "temp":
+                    show("HSC {0:02x}  {1:02x}:   {2} C".format(address,offset,(val&0xff)+((val&0xff00)>>8)*256),serial)
+                elif args[1] == "power":
+                    show("HSC {0:02x}  {1:02x}:   {2} w".format(address,offset,(val&0xff)+((val&0xff00)>>8)*256),serial)
+                elif args[1] == "alert":
+                    show("HSC {0:02x}  {1:02x}:   0x{3:02X}{4:02X}".format(address,offset,(val&0xff),((val&0xff00)>>8)),serial)          
+            except Exception as err:
+                show(err,serial)
+
+        if name == "temp":
+            pass
+
+
+    def i2c_command(self,name,serial=None,*args):
+        # init 
+        val = None
+        address = None
+        offset = None
+        count = None
+        # get i2c1 bus
+        bus =  smbus.SMBus(1)
+        if name == "i2c_probe":
+            if len(args) > 0:
+                show("error, no need argument\n",serial)
+                return -1
+            show("Scanning I2C1\n",serial)
+            #print the header
+            show("    ",serial)
+            i = 0
+            while i<0xf :
+                show("{0:X}  ".format(i),serial)
+                i +=2
+            # probe address
+            i = 0
+            while i<0xFF:
+                if i == 0 or i%16 == 0:
+                    show("\n{0:02X}: ".format(i),serial)
+                if bus.read_byte_data(i,0x1) < 0:
+                    show("-  ",serial)
+                else:
+                    show("{0:02X} ".format(i),serial)
+            show("\n",serial)
+
+        if name == "i2c_dump":
+            if len(args) < 1:
+                show("Need i2c_dev_addr\n",serial)
+                return -1
+            address = int(args[0])
+            for offset in range(256):
+                val = bus.read_byte_data(address,offset)
+                if val >= 0:
+                    show("0x{0:02X}:0x{1:02X}\n".format(address,offset),serial)
+             
+        if name == "i2c_byte_read":
+            if len(args) < 2:
+                show("Need i2c_dev_addr, dev_reg_addr\n",serial)
+            address = int(args[0])
+            offset = int(args[1])
+            val = bus.read_byte_data(address,offset)
+            if val < 0:
+                show("Error reading device register 0x{0:x} from addr 0x{1:x} \nI2c bus collision may detect, please try again\n".format(address,offset),serial)
+            return val
+
+        if name == "i2c_byte_write":
+            if len(args) < 3:
+                show("Need i2c_dev_addr, dev_reg_addr, reg_val\n",serial)
+            address = int(args[0])
+            offset = int(args[1])
+            val = int(args[2])
+            bus.write_byte_data(address,offset,val)
+
+        if name == "i2c_word_read":
+            if len(args) < 2:
+                show("Need i2c_dev_addr, dev_reg_addr\n",serial)
+            address = int(args[0])
+            offset = int(args[1])
+            val = bus.read_word_data(address,offset)
+            if val < 0:
+                show("Error reading device register 0x{0:x} from addr 0x{1:x} \nI2c bus collision may detect, please try again\n".format(address,offset),serial)
+            return val
+
+        if name == "i2c_word_write":
+            if len(args) < 3:
+                show("Need i2c_dev_addr, dev_reg_addr, reg_val\n",serial)
+            address = int(args[0])
+            offset = int(args[1])
+            val = int(args[2])
+            bus.write_word_data(address,offset,val)
+
+        if name == "i2c_block_read":
+            if len(args) < 3:
+                show("Need i2c_dev_addr, dev_reg_addr, byte_count\n",serial)
+            address = int(args[0])
+            offset = int(args[1])
+            count = int(args[2])
+            try:
+                val = bus.read_i2c_block_data(address,offset,count)
+            except Exception as err:
+                show("Error reading device register 0x{0:x} from addr 0x{1:x} \nI2c bus collision may detect, please try again\n{2}".format(address,offset,err),serial)
+            return val
+
+        if name == "i2c_block_write":
+            num = len(args)
+            if num < 4:
+                show("Need i2c_dev_addr, dev_reg_addr, byte_count ,reg_val[0] , reg_val[1] ....\n",serial)
+            address = int(args[0])
+            offset = int(args[1])
+            count = int(args[2])
+            if count == num - 3:
+                try:
+                    val = args[3:]
+                    bus.write_i2c_block_data(address,offset,val)
+                except Exception as err:
+                    show("Error writing device register 0x{0:x} from addr 0x{1:x} \nI2c bus collision may detect, please try again\n{2}".format(address,offset,err),serial)
+            else:
+                show("the count is not equal to value list num\n",serial)
+       
+
+    def ip_command(self,name,serial=None):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(('8.8.8.8', 80))
+            ip = s.getsockname()[0]
+        finally:
+            s.close()
+        return ip
+
+
+if __name__ == '__main__':
+    # python terminal_cmd.py cmd_name arg1 arg2 arg3 
+    #cmd_name = sys.argv[1]
+    #args = tuple(str(sys.argv[2:]))
+    terminal_command = CMDManager()
+    #terminal_command.apply_cmd(cmd_name,*args)
+    terminal_command.apply_cmd("help")
+    #terminal_command.apply_cmd("version")
+    

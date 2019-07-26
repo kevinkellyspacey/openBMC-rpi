@@ -5,11 +5,13 @@ import smbus
 import time
 from openBMC.smbpbi import smbpbi_read
 from openBMC.serial_shell import ushell
-from openBMC.dbus_backend import Backend
+from openBMC.dbus_backend import Backend,dbus_sync_call_signal_wrapper,unwrap
 from datetime import datetime
 from datetime import timedelta
 from threading import Thread
 import logging
+import dbus
+import sys
 
 ##                ##
 ##Common Variables##
@@ -72,14 +74,62 @@ def max31790_set_pwm(slave_addr,offset,duty_cycle_percent,bus):
     bus.write_word_data(slave_addr,offset,duty_cycle_word)
 
 
-def pwm_user_reqest_set(GPU_type,duty_cycle_percent):
-    pass
+def pwm_user_reqest_set(GPU_type,duty_cycle_percent,bus,dbus_iface):
+    if GPU_type == 0:
+        # set pwm out1
+        max31790_set_pwm(MAX31790_7bit_ADDR, 0x40,duty_cycle_percent,bus)
+        time.sleep(0.001)
+        # set pwm out2
+        max31790_set_pwm(MAX31790_7bit_ADDR, 0x42,duty_cycle_percent,bus)
+        time.sleep(0.001)
+        set_dbus_data(0,"percent",duty_cycle_percent,dbus_iface)
+    elif GPU_type == 1:
+        # set pwm out3
+        max31790_set_pwm(MAX31790_7bit_ADDR, 0x44,duty_cycle_percent,bus)
+        time.sleep(0.001)
+        # set pwm out4
+        max31790_set_pwm(MAX31790_7bit_ADDR, 0x46,duty_cycle_percent,bus)
+        time.sleep(0.001)
+        set_dbus_data(1,"percent",duty_cycle_percent,dbus_iface)
+    elif GPU_type == 2:
+        # set pwm out5
+        max31790_set_pwm(MAX31790_7bit_ADDR, 0x48,duty_cycle_percent,bus)
+        time.sleep(0.001)
+        set_dbus_data(2,"percent",duty_cycle_percent,dbus_iface)
+    elif GPU_tyepe == 3:
+        # set pwm out1
+        max31790_set_pwm(MAX31790_7bit_ADDR, 0x40,duty_cycle_percent,bus)
+        time.sleep(0.001)
+        # set pwm out2
+        max31790_set_pwm(MAX31790_7bit_ADDR, 0x42,duty_cycle_percent,bus)
+        time.sleep(0.001)
+        # set pwm out3
+        max31790_set_pwm(MAX31790_7bit_ADDR, 0x44,duty_cycle_percent,bus)
+        time.sleep(0.001)
+        # set pwm out4
+        max31790_set_pwm(MAX31790_7bit_ADDR, 0x46,duty_cycle_percent,bus)
+        time.sleep(0.001)
+        # set pwm out5
+        max31790_set_pwm(MAX31790_7bit_ADDR, 0x48,duty_cycle_percent,bus)
+        time.sleep(0.001)
+        for i in range(3):
+            set_dbus_data(i,"percent",duty_cycle_percent,dbus_iface)
 
-def pwm_user_request_clear(GPU_type):
-    pass
+#def pwm_user_request_clear(GPU_type):
+#    pass
 
-def pwm_user_request_read(GPU_type):
-    pass
+def set_dbus_data(GPU_index,type,data,dbus_iface):
+    # set the data to dbus server database which can share with different threads
+    dbus_data = dbus_sync_call_signal_wrapper(dbus_iface,"set_data",{},data,type,GPU_index)
+
+def get_dbus_data(GPU_index,type,dbus_iface):
+    # get the data from dbus server database which can share with different threads
+    dbus_data = dbus_sync_call_signal_wrapper(dbus_iface,"get_data",{},type,GPU_index)
+    if dbus_data:
+        val = unwrap(dbus_data)
+        # the return value is a list
+        return val[0]
+
 
 def check_sxm_master_pwr_good(bus):
     '''check_sxm_master_pwr_gd() is used to check whether Mother Board power and FPGA_MASTER_PWM_EN are on to avoid throw out error message even if sxm is not ready.
@@ -144,17 +194,13 @@ class fan_control(object):
     def __init__(self, bus=None,polling=True):
         self.polling = polling
         self.bus = bus
-        self.thredhold = 900 # 900 ms to finish one loop
-        # user set group(GPU0,GPU1,LR) from uart input, -1 represent there's no uart request which is also the intial default otherwise 0-100
-        self.user_set = [-1,-1,-1]
-
-        
-        #dbus timeout
-        self.timeout = timeout
+        self.thredhold = 900 # 900 ms to finish one 
+        # dbus client instance
+        self._dbus_iface = dbus.Interface(dbus.SystemBus().get_object('com.openBMC.RPI','/RPI'),'com.openBMC.RPI')
 
         self.fan_thread = Thread(target=self.fan_ctrl_loop)
         self.uart_thread = Thread(target=self.ushell_loop)
-        self.listenerThread = Thread(target=self.dbus_listener)
+        self.dbus_thread = Thread(target=self.dbus_listener)
 
     def fan_ctrl_loop(self,):
         start_point = datetime.now()
@@ -166,7 +212,7 @@ class fan_control(object):
                 ## GPU0 fan control ###########################################
                 if GPU0_pwr_good_set == 0 :
                     duty_cycle_percent = 20
-                elif self.user_set[0] == -1:
+                elif get_dbus_data(0,"user",self._dbus_iface) == 0:
                     # get GPU0 temp
                     gpu = get_temp("GPU0_TEMP",self.bus)
                     # get GPU0 HBM
@@ -184,17 +230,13 @@ class fan_control(object):
                             fail_times[0] = 0
                             print("GPU0 reading recovered, and fan control enabled again!\n")
                 print("GPU0 duty percent is {}".format(duty_cycle_percent))
-                # set pwm out1
-                max31790_set_pwm(MAX31790_7bit_ADDR, 0x40,duty_cycle_percent,self.bus)
-                time.sleep(0.001)
-                # set pwm out2
-                max31790_set_pwm(MAX31790_7bit_ADDR, 0x42,duty_cycle_percent,self.bus)
-                time.sleep(0.001)
+                # update the percent to dbus server
+                pwm_user_reqest_set(0,duty_cycle_percent,self.bus,self._dbus_iface)
 
                 ## GPU1 fan control ############################################
                 if GPU1_pwr_good_set == 0 :
                     duty_cycle_percent = 20
-                elif self.user_set[1] == -1:
+                elif get_dbus_data(1,"user",self._dbus_iface) == 0:
                     # get GPU1 temp
                     gpu = get_temp("GPU1_TEMP",self.bus)
                     # get GPU1 HBM
@@ -212,17 +254,13 @@ class fan_control(object):
                             fail_times[1] = 0
                             print("GPU1 reading recovered, and fan control enabled again!\n")
                 print("GPU1 duty percent is {}".format(duty_cycle_percent))
-                # set pwm out3
-                max31790_set_pwm(MAX31790_7bit_ADDR, 0x44,duty_cycle_percent,self.bus)
-                time.sleep(0.001)
-                # set pwm out4
-                max31790_set_pwm(MAX31790_7bit_ADDR, 0x46,duty_cycle_percent,self.bus)
-                time.sleep(0.001)
+                # update the percent to dbus server
+                pwm_user_reqest_set(1,duty_cycle_percent,self.bus,self._dbus_iface)
                 
                 ## LR fan control ##############################################
                 if LR_pwr_good_set == 0 :
                     duty_cycle_percent = 20
-                elif self.user_set[2] == -1:
+                elif get_dbus_data(2,"user",self._dbus_iface) == 0:
                     # get LR temp
                     gpu = get_temp("LR_TEMP",self.bus)
                     if (gpu == -1):
@@ -238,9 +276,8 @@ class fan_control(object):
                             fail_times[2] = 0
                             print("LR reading recovered, and fan control enabled again!\n")
                 print("LR duty percent is {}".format(duty_cycle_percent))
-                # set pwm out5
-                max31790_set_pwm(MAX31790_7bit_ADDR, 0x48,duty_cycle_percent,self.bus)
-                time.sleep(0.001)
+                # update the percent to dbus server
+                pwm_user_reqest_set(2,duty_cycle_percent,self.bus,self._dbus_iface)
                 
                 #update start point
                 start_point = datetime.now()
@@ -257,14 +294,12 @@ class fan_control(object):
         if not svr:
             logging.error("Error spawning DBUS server")
             sys.exit(10)
-        if self.timeout == 0:
-            logging.debug("dbus session server is running")
-            svr.run_dbus_service()
+        logging.debug("dbus session server is running")
+        svr.run_dbus_service()
 
-        else:
-            svr.run_dbus_service(self.timeout)
 
     def run(self,):
+        self.dbus_thread.start()
         self.fan_thread.start()
         self.uart_thread.start()
 
