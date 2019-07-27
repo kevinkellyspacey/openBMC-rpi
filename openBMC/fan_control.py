@@ -4,7 +4,6 @@ import argparse
 import smbus
 import time
 from openBMC.smbpbi import smbpbi_read
-from openBMC.serial_shell import ushell
 from openBMC.dbus_backend import Backend,dbus_sync_call_signal_wrapper,unwrap
 from datetime import datetime
 from datetime import timedelta
@@ -74,7 +73,7 @@ def max31790_set_pwm(slave_addr,offset,duty_cycle_percent,bus):
     bus.write_word_data(slave_addr,offset,duty_cycle_word)
 
 
-def pwm_user_reqest_set(GPU_type,duty_cycle_percent,bus,dbus_iface):
+def pwm_reqest_set(GPU_type,duty_cycle_percent,bus,dbus_iface):
     if GPU_type == 0:
         # set pwm out1
         max31790_set_pwm(MAX31790_7bit_ADDR, 0x40,duty_cycle_percent,bus)
@@ -115,8 +114,6 @@ def pwm_user_reqest_set(GPU_type,duty_cycle_percent,bus,dbus_iface):
         for i in range(3):
             set_dbus_data(i,"percent",duty_cycle_percent,dbus_iface)
 
-#def pwm_user_request_clear(GPU_type):
-#    pass
 
 def set_dbus_data(GPU_index,type,data,dbus_iface):
     # set the data to dbus server database which can share with different threads
@@ -198,9 +195,6 @@ class fan_control(object):
         # dbus client instance
         self._dbus_iface = dbus.Interface(dbus.SystemBus().get_object('com.openBMC.RPI','/RPI'),'com.openBMC.RPI')
 
-        self.fan_thread = Thread(target=self.fan_ctrl_loop)
-        self.uart_thread = Thread(target=self.ushell_loop)
-        self.dbus_thread = Thread(target=self.dbus_listener)
 
     def fan_ctrl_loop(self,):
         start_point = datetime.now()
@@ -210,6 +204,7 @@ class fan_control(object):
                 GPU0_pwr_good_set,GPU1_pwr_good_set,LR_pwr_good_set = check_sxm_master_pwr_good(self.bus)
                 #print(GPU0_pwr_good_set,GPU1_pwr_good_set,LR_pwr_good_set)
                 ## GPU0 fan control ###########################################
+                duty_cycle_percent = get_dbus_data(0,"percent",self._dbus_iface) 
                 if GPU0_pwr_good_set == 0 :
                     duty_cycle_percent = 20
                 elif get_dbus_data(0,"user",self._dbus_iface) == 0:
@@ -231,9 +226,10 @@ class fan_control(object):
                             print("GPU0 reading recovered, and fan control enabled again!\n")
                 print("GPU0 duty percent is {}".format(duty_cycle_percent))
                 # update the percent to dbus server
-                pwm_user_reqest_set(0,duty_cycle_percent,self.bus,self._dbus_iface)
+                pwm_reqest_set(0,duty_cycle_percent,self.bus,self._dbus_iface)
 
                 ## GPU1 fan control ############################################
+                duty_cycle_percent = get_dbus_data(1,"percent",self._dbus_iface) 
                 if GPU1_pwr_good_set == 0 :
                     duty_cycle_percent = 20
                 elif get_dbus_data(1,"user",self._dbus_iface) == 0:
@@ -255,9 +251,10 @@ class fan_control(object):
                             print("GPU1 reading recovered, and fan control enabled again!\n")
                 print("GPU1 duty percent is {}".format(duty_cycle_percent))
                 # update the percent to dbus server
-                pwm_user_reqest_set(1,duty_cycle_percent,self.bus,self._dbus_iface)
+                pwm_reqest_set(1,duty_cycle_percent,self.bus,self._dbus_iface)
                 
                 ## LR fan control ##############################################
+                duty_cycle_percent = get_dbus_data(2,"percent",self._dbus_iface) 
                 if LR_pwr_good_set == 0 :
                     duty_cycle_percent = 20
                 elif get_dbus_data(2,"user",self._dbus_iface) == 0:
@@ -277,37 +274,16 @@ class fan_control(object):
                             print("LR reading recovered, and fan control enabled again!\n")
                 print("LR duty percent is {}".format(duty_cycle_percent))
                 # update the percent to dbus server
-                pwm_user_reqest_set(2,duty_cycle_percent,self.bus,self._dbus_iface)
+                pwm_reqest_set(2,duty_cycle_percent,self.bus,self._dbus_iface)
                 
                 #update start point
                 start_point = datetime.now()
 
-    def ushell_loop(self,):
-        pass
-
-    def dbus_listener(self,):
-        '''listener thread to catch every Application signal'''
-        #create dbus server
-        svr = Backend.create_dbus_server()
-        sys.stdout.write("dbus_listener thread is running!")
-        logging.debug("the svr is {}".format(svr))
-        if not svr:
-            logging.error("Error spawning DBUS server")
-            sys.exit(10)
-        logging.debug("dbus session server is running")
-        svr.run_dbus_service()
-
-
-    def run(self,):
-        self.dbus_thread.start()
-        self.fan_thread.start()
-        self.uart_thread.start()
 
 
 if __name__ == '__main__':
     i2c1 = i2c1_init()
     tmp451_init(i2c1)
     loop_task = fan_control(i2c1)
-    #loop_task.fan_ctrl_loop()
-    loop_task.run()
+    loop_task.fan_ctrl_loop()
    
